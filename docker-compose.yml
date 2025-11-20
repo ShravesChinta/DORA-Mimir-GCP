@@ -1,0 +1,84 @@
+version: "3.9"
+
+networks:
+  monitor-net:
+    driver: bridge
+
+services:
+  # The Python application to generate and push DORA metrics
+  python-generator:
+    build:
+      context: ./python
+      dockerfile: Dockerfile
+    # The generator runs once and exits, so no restart policy is needed
+    depends_on:
+      - pushgateway
+    networks:
+      - monitor-net
+
+  # Receives ephemeral metrics from the Python generator
+  pushgateway:
+    image: prom/pushgateway:v1.7.0
+    container_name: pushgateway
+    ports:
+      - "9091:9091"
+    networks:
+      - monitor-net
+    restart: always
+
+  # Scrapes Pushgateway and remotely writes to Mimir
+  prometheus:
+    image: prom/prometheus:v2.50.1
+    container_name: prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    # Crucially depends on Mimir being started and healthy
+    depends_on:
+      pushgateway:
+        condition: service_started
+      mimir:
+        condition: service_started
+    networks:
+      - monitor-net
+    restart: always
+
+  # The distributed time-series database (in single-node mode)
+  mimir:
+    image: grafana/mimir:2.10.1
+    container_name: mimir
+    # IMPORTANT: Run in single-node mode for a local setup
+    command:
+      - "-config.file=/etc/mimir/mimir.yml"
+      - "-target=all"
+      - "-ingester.ring.instance_addr=mimir:9095"
+    volumes:
+      - ./mimir.yml:/etc/mimir/mimir.yml:ro
+      - mimir-data:/data
+    ports:
+      # Internal port for Prometheus remote_write
+      - "9009:9009"
+      # Mimir's gRPC port - useful for debugging/admin
+      - "9095:9095"
+    networks:
+      - monitor-net
+    restart: always
+
+  # Visualization layer
+  grafana:
+    image: grafana/grafana:10.4.1
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - mimir
+    networks:
+      - monitor-net
+    volumes:
+      - grafana-storage:/var/lib/grafana
+    restart: always
+
+volumes:
+  grafana-storage:
+  mimir-data:
